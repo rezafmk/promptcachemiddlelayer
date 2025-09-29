@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 2.8.12)
-project(LMCache)
+project(TempCache)
 
 # --- Set C++ Standard ---
 # For CMake < 3.1, we must set the standard via compiler flags.

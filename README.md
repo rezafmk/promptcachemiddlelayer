@@ -1,4 +1,4 @@
-# LMCache: A Simple In-Process KV Cache for LLMs
+# TempCache: A Simple In-Process KV Cache for LLMs
 
 This project provides a minimal C++20 library that implements a simple, in-process key-value cache middle layer for Large Language Model (LLM) KV blocks. It's designed to interface directly with an S3-compatible object store.
 
