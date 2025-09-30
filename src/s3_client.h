@@ -1,6 +1,6 @@
 #pragma once
 
-#include "kvcache/types.hpp" // Corrected: Was "kvcache/config.hpp"
+#include "kvcache/config.hpp"
 #include <aws/s3/S3Client.h>
 #include <memory>
 #include <string>

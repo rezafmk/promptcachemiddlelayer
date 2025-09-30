@@ -42,7 +42,7 @@ S3Client::S3Client(const Config& config) : bucket_name_(config.s3_bucket) {
     
     Aws::Auth::AWSCredentials credentials(config.aws_access_key_id, config.aws_secret_access_key);
     
-    s3_client_ = std::make_unique<Aws::S3::S3Client>(credentials, client_cfg,
+    client_ = std::make_unique<Aws::S3::S3Client>(credentials, client_cfg,
         Aws::Client::AWSAuthV4Signer::PayloadSigningPolicy::Never, config.s3_use_path_style);
 }
 
@@ -57,7 +57,7 @@ bool S3Client::PutObject(const std::string& key, std::span<const std::uint8_t> d
     input_data->write(reinterpret_cast<const char*>(data.data()), data.size());
     request.SetBody(input_data);
 
-    auto outcome = s3_client_->PutObject(request);
+    auto outcome = client_->PutObject(request);
     if (!outcome.IsSuccess()) {
         std::cerr << "S3 PutObject error: " << outcome.GetError().GetMessage() << std::endl;
     }
@@ -69,7 +69,7 @@ bool S3Client::GetObject(const std::string& key, std::vector<std::uint8_t>* out_
     request.SetBucket(bucket_name_);
     request.SetKey(key);
 
-    auto outcome = s3_client_->GetObject(request);
+    auto outcome = client_->GetObject(request);
     if (!outcome.IsSuccess()) {
         // It's common for Get to fail if the object doesn't exist, so don't always log as an error.
         return false;
@@ -85,7 +85,7 @@ bool S3Client::DeleteObject(const std::string& key) {
     request.SetBucket(bucket_name_);
     request.SetKey(key);
 
-    auto outcome = s3_client_->DeleteObject(request);
+    auto outcome = client_->DeleteObject(request);
     if (!outcome.IsSuccess()) {
         std::cerr << "S3 DeleteObject error: " << outcome.GetError().GetMessage() << std::endl;
     }
