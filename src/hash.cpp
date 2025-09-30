@@ -1,6 +1,5 @@
 #include "kvcache/hash.hpp"
-#include "xxh3.h"
-
+#include "xxhash.h" // Corrected include path
 #include <vector>
 #include <iomanip>
 #include <sstream>
