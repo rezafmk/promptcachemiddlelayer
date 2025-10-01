@@ -32,7 +32,7 @@ public:
     bool Load(const BlockRef& ref, std::vector<std::uint8_t>* out_bytes);
     bool Store(const std::vector<std::uint32_t>& tokens,
                std::uint32_t block_index,
-               std::span<const std::uint8_t> block_bytes);
+               bytes_view block_bytes);
     
     std::uint64_t UsedBytes() const;
     std::uint64_t CapacityBytes() const;
@@ -203,7 +203,7 @@ bool KVCacheImpl::Load(const BlockRef& ref, std::vector<std::uint8_t>* out_bytes
 
 bool KVCacheImpl::Store(const std::vector<std::uint32_t>& tokens,
                         std::uint32_t block_index,
-                        std::span<const std::uint8_t> block_bytes) {
+                        bytes_view block_bytes) {
     const std::uint32_t B = config_.block_size_tokens;
     std::uint32_t prefix_token_count = (block_index + 1) * B;
 
@@ -281,7 +281,7 @@ KVCache::KVCache(const Config& cfg) : p_impl(std::make_unique<KVCacheImpl>(cfg))
 KVCache::~KVCache() = default;
 LookupResult KVCache::Lookup(const std::vector<std::uint32_t>& tokens) const { return p_impl->Lookup(tokens); }
 bool KVCache::Load(const BlockRef& ref, std::vector<std::uint8_t>* out_bytes) { return p_impl->Load(ref, out_bytes); }
-bool KVCache::Store(const std::vector<std::uint32_t>& tokens, std::uint32_t block_index, std::span<const std::uint8_t> block_bytes) {
+bool KVCache::Store(const std::vector<std::uint32_t>& tokens, std::uint32_t block_index, bytes_view block_bytes) {
     return p_impl->Store(tokens, block_index, block_bytes);
 }
 std::uint64_t KVCache::UsedBytes() const { return p_impl->UsedBytes(); }

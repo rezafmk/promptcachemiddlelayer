@@ -1,26 +1,32 @@
 #pragma once
 
-#include "kvcache/types.hpp" // Corrected: Was "kvcache/config.hpp"
-#include <aws/s3/S3Client.h>
+#include "types.hpp"
+#include "span_compat.hpp"
 #include <memory>
 #include <string>
 #include <vector>
-#include <span>
+#include <cstdint>
+
+namespace Aws {
+    namespace S3 {
+        class S3Client;
+    }
+}
 
 namespace kvcache {
 
 class S3Client {
 public:
-    S3Client(const Config& config);
+    explicit S3Client(const Config& cfg);
     ~S3Client();
 
-    bool PutObject(const std::string& key, std::span<const std::uint8_t> data);
-    bool GetObject(const std::string& key, std::vector<std::uint8_t>* out_bytes);
+    bool GetObject(const std::string& key, std::vector<std::uint8_t>* data);
+    bool PutObject(const std::string& key, bytes_view data);
     bool DeleteObject(const std::string& key);
 
 private:
-    std::string bucket_name_;
-    std::unique_ptr<Aws::S3::S3Client> client_;
+    struct S3ClientImpl;
+    std::unique_ptr<S3ClientImpl> p_impl;
 };
 
 } // namespace kvcache

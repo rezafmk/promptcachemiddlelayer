@@ -2,9 +2,9 @@
 
 #include "types.hpp"
 #include <vector>
-#include <cstdint>
 #include <memory>
-#include <span>
+#include <cstdint>
+#include "span_compat.hpp"
 
 namespace kvcache {
 
@@ -25,7 +25,7 @@ public:
     // Store one block for the prefix ending at block_index.
     bool Store(const std::vector<std::uint32_t>& tokens,
                std::uint32_t block_index,
-               std::span<const std::uint8_t> block_bytes);
+               bytes_view block_bytes);
 
     // Introspection
     std::uint64_t UsedBytes() const;

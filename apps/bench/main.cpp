@@ -1,153 +1,148 @@
 #include "kvcache/api.hpp"
-#include "kvcache/types.hpp"
 #include <iostream>
 #include <vector>
+#include <string>
 #include <random>
 #include <thread>
+#include <atomic>
 #include <chrono>
 #include <numeric>
-#include <atomic>
-#include <iomanip>
-#include <cstdlib> // For getenv
+#include "kvcache/cxxopts.hpp"
 
 struct BenchConfig {
-    int iterations = 50000;
-    int threads = 8;
-    int num_prefixes = 10000;
-    double reuse_prob = 0.30;
-    uint32_t block_size = 256;
-    uint64_t avg_block_bytes = 1048576;
-    kvcache::Config cache_config;
+    int num_threads = 4;
+    int num_prompts = 1000;
+    int min_prompt_len = 512;
+    int max_prompt_len = 2048;
+    int block_size = 256;
+    double get_ratio = 0.8;
 };
 
 struct Stats {
-    std::atomic<int> ops = 0;
-    std::atomic<int> hits = 0;
-    std::atomic<uint64_t> bytes_stored = 0;
-    std::atomic<double> get_latency_ms = 0.0;
-    std::atomic<double> put_latency_ms = 0.0;
+    std::atomic<int> num_puts{0};
+    std::atomic<int> num_gets{0};
+    std::atomic<int> cache_hits{0};
+    std::atomic<double> put_latency_ms{0.0};
+    std::atomic<double> get_latency_ms{0.0};
 };
 
-void worker_thread(kvcache::KVCache& cache, const BenchConfig& config, Stats& stats, const std::vector<std::vector<unsigned int>>& prefixes, int thread_id) {
-    std::mt19937 gen(thread_id);
-    std::uniform_real_distribution<> dis(0.0, 1.0);
-    std::uniform_int_distribution<> prefix_dist(0, prefixes.size() - 1);
-    std::uniform_int_distribution<unsigned int> token_dist(0, 100000);
+// Helper function to atomically add to a std::atomic<double>
+// This is required for compilers that don't support fetch_add on double (pre-C++20)
+void atomic_add_double(std::atomic<double>& atomic_double, double value) {
+    double old_val = atomic_double.load();
+    double new_val;
+    do {
+        new_val = old_val + value;
+    } while (!atomic_double.compare_exchange_weak(old_val, new_val));
+}
 
-    for (int i = 0; i < config.iterations / config.threads; ++i) {
-        std::vector<unsigned int> tokens;
-        if (dis(gen) < config.reuse_prob) {
-            tokens = prefixes[prefix_dist(gen)];
+std::vector<std::uint32_t> generate_prompt(int len, std::mt19937& rng) {
+    std::vector<std::uint32_t> tokens(len);
+    std::uniform_int_distribution<std::uint32_t> dist(0, 50256); // vocab size
+    for (int i = 0; i < len; ++i) {
+        tokens[i] = dist(rng);
+    }
+    return tokens;
+}
+
+void worker_thread(kvcache::KVCache& cache,
+                   const BenchConfig& cfg,
+                   Stats& stats,
+                   const std::vector<std::vector<std::uint32_t>>& prompts,
+                   int thread_id) {
+    std::mt19937 rng(thread_id);
+    std::uniform_real_distribution<> op_dist(0.0, 1.0);
+    std::uniform_int_distribution<int> prompt_dist(0, prompts.size() - 1);
+
+    int ops_per_thread = cfg.num_prompts / cfg.num_threads;
+
+    for (int i = 0; i < ops_per_thread; ++i) {
+        const auto& tokens = prompts[prompt_dist(rng)];
+        
+        if (op_dist(rng) < cfg.get_ratio) {
+            // GET operation
+            auto start = std::chrono::high_resolution_clock::now();
+            auto result = cache.Lookup(tokens);
+            auto end = std::chrono::high_resolution_clock::now();
+            
+            stats.num_gets++;
+            if (result.matched_tokens > 0) {
+                stats.cache_hits++;
+            }
+            atomic_add_double(stats.get_latency_ms, std::chrono::duration<double, std::milli>(end - start).count());
+
         } else {
-            int num_blocks = std::uniform_int_distribution<>(1, 8)(gen);
-            tokens.resize(num_blocks * config.block_size);
-            for(auto& token : tokens) token = token_dist(gen);
-        }
+            // PUT operation
+            std::uint32_t num_blocks = tokens.size() / cfg.block_size;
+            if (num_blocks == 0) continue;
 
-        auto lookup_res = cache.Lookup(tokens);
-        stats.ops++;
-        if (lookup_res.matched_tokens > 0) {
-            stats.hits++;
-        }
-
-        size_t full_blocks = tokens.size() / config.block_size;
-        size_t matched_blocks = lookup_res.matched_tokens / config.block_size;
-
-        if (matched_blocks < full_blocks) {
-            uint32_t block_index_to_store = matched_blocks;
-            std::vector<uint8_t> block_bytes(config.avg_block_bytes);
-            std::fill(block_bytes.begin(), block_bytes.end(), static_cast<uint8_t>(thread_id));
+            std::vector<std::uint8_t> block_data(1024); // dummy data
             
             auto start = std::chrono::high_resolution_clock::now();
-            cache.Store(tokens, block_index_to_store, block_bytes);
+            for (std::uint32_t j = 0; j < num_blocks; ++j) {
+                cache.Store(tokens, j, block_data);
+            }
             auto end = std::chrono::high_resolution_clock::now();
-            stats.put_latency_ms += std::chrono::duration<double, std::milli>(end - start).count();
-            stats.bytes_stored += block_bytes.size();
-        }
-
-        if (!lookup_res.handles.empty()) {
-            int block_to_load_idx = std::uniform_int_distribution<int>(0, lookup_res.handles.size() - 1)(gen);
-            std::vector<uint8_t> out_bytes;
             
-            auto start = std::chrono::high_resolution_clock::now();
-            cache.Load(lookup_res.handles[block_to_load_idx], &out_bytes);
-            auto end = std::chrono::high_resolution_clock::now();
-            stats.get_latency_ms += std::chrono::duration<double, std::milli>(end - start).count();
+            stats.num_puts++;
+            atomic_add_double(stats.put_latency_ms, std::chrono::duration<double, std::milli>(end - start).count());
         }
     }
 }
 
-// Helper to get environment variables
-std::string get_env(const char* name, const std::string& default_val = "") {
-    const char* val = std::getenv(name);
-    return val == nullptr ? default_val : std::string(val);
-}
-
-int main(int argc, char* argv[]) {
-    BenchConfig bench_config;
+int main(int argc, char** argv) {
+    cxxopts::Options options("kvbench", "Benchmark tool for KVCache");
+    options.add_options()
+        ("t,threads", "Number of worker threads", cxxopts::value<int>()->default_value("4"))
+        ("p,prompts", "Total number of operations", cxxopts::value<int>()->default_value("1000"))
+        ("min-len", "Min prompt length", cxxopts::value<int>()->default_value("512"))
+        ("max-len", "Max prompt length", cxxopts::value<int>()->default_value("2048"))
+        ("b,block-size", "Block size in tokens", cxxopts::value<int>()->default_value("256"))
+        ("g,get-ratio", "Ratio of GET operations (0.0 to 1.0)", cxxopts::value<double>()->default_value("0.8"))
+        ("h,help", "Print usage");
     
-    // Read S3 config from environment variables
-    bench_config.cache_config.s3_endpoint = get_env("AWS_ENDPOINT_URL");
-    bench_config.cache_config.s3_region = get_env("AWS_REGION");
-    bench_config.cache_config.aws_access_key_id = get_env("AWS_ACCESS_KEY_ID");
-    bench_config.cache_config.aws_secret_access_key = get_env("AWS_SECRET_ACCESS_KEY");
+    auto result = options.parse(argc, argv);
 
-    // Simple argument parsing
-    for (int i = 1; i < argc; ++i) {
-        std::string arg = argv[i];
-        if (arg == "--iterations" && i + 1 < argc) bench_config.iterations = std::stoi(argv[++i]);
-        else if (arg == "--threads" && i + 1 < argc) bench_config.threads = std::stoi(argv[++i]);
-        else if (arg == "--capacity-bytes" && i + 1 < argc) bench_config.cache_config.capacity_bytes = std::stoull(argv[++i]);
-        else if (arg == "--s3-bucket" && i + 1 < argc) bench_config.cache_config.s3_bucket = argv[++i];
+    if (result.count("help")) {
+      std::cout << options.help() << std::endl;
+      exit(0);
     }
 
-    // --- Configuration Validation ---
-    bool config_ok = true;
-    if (bench_config.cache_config.s3_endpoint.empty()) {
-        std::cerr << "Error: S3 endpoint not set. Please set the AWS_ENDPOINT_URL environment variable." << std::endl;
-        config_ok = false;
-    }
-    if (bench_config.cache_config.s3_region.empty()) {
-        std::cerr << "Error: S3 region not set. Please set the AWS_REGION environment variable." << std::endl;
-        config_ok = false;
-    }
-    if (bench_config.cache_config.aws_access_key_id.empty()) {
-        std::cerr << "Error: AWS access key not set. Please set the AWS_ACCESS_KEY_ID environment variable." << std::endl;
-        config_ok = false;
-    }
-    if (bench_config.cache_config.aws_secret_access_key.empty()) {
-        std::cerr << "Error: AWS secret key not set. Please set the AWS_SECRET_ACCESS_KEY environment variable." << std::endl;
-        config_ok = false;
-    }
-    if (bench_config.cache_config.s3_bucket.empty()) {
-        std::cerr << "Error: S3 bucket not specified. Please provide it using the --s3-bucket <name> argument." << std::endl;
-        config_ok = false;
+    BenchConfig cfg;
+    cfg.num_threads = result["threads"].as<int>();
+    cfg.num_prompts = result["prompts"].as<int>();
+    cfg.min_prompt_len = result["min-len"].as<int>();
+    cfg.max_prompt_len = result["max-len"].as<int>();
+    cfg.block_size = result["block-size"].as<int>();
+    cfg.get_ratio = result["get-ratio"].as<double>();
+
+    std::cout << "--- Benchmark Configuration ---" << std::endl;
+    std::cout << "Threads: " << cfg.num_threads << std::endl;
+    std::cout << "Total Ops: " << cfg.num_prompts << std::endl;
+    std::cout << "Prompt Length: [" << cfg.min_prompt_len << ", " << cfg.max_prompt_len << "]" << std::endl;
+    std::cout << "Block Size: " << cfg.block_size << std::endl;
+    std::cout << "GET Ratio: " << cfg.get_ratio << std::endl;
+    std::cout << "-----------------------------" << std::endl;
+
+    // Generate a pool of prompts
+    std::mt19937 rng(1234);
+    std::uniform_int_distribution<int> len_dist(cfg.min_prompt_len, cfg.max_prompt_len);
+    std::vector<std::vector<std::uint32_t>> prompts;
+    for (int i = 0; i < 100; ++i) { // pool of 100 prompts
+        prompts.push_back(generate_prompt(len_dist(rng), rng));
     }
 
-    if (!config_ok) {
-        return 1;
-    }
+    kvcache::Config kv_cfg;
+    kv_cfg.block_size_tokens = cfg.block_size;
+    kvcache::KVCache cache(kv_cfg);
 
-    // Pre-generate prefixes
-    std::cout << "Generating " << bench_config.num_prefixes << " prefixes..." << std::endl;
-    std::vector<std::vector<unsigned int>> prefixes(bench_config.num_prefixes);
-    std::mt19937 gen(0);
-    std::uniform_int_distribution<unsigned int> token_dist(0, 100000);
-    for (auto& p : prefixes) {
-        int num_blocks = std::uniform_int_distribution<>(1, 8)(gen);
-        p.resize(num_blocks * bench_config.block_size);
-        for(auto& token : p) token = token_dist(gen);
-    }
-
-    kvcache::KVCache cache(bench_config.cache_config);
     std::vector<std::thread> threads;
-    std::vector<Stats> stats(bench_config.threads);
+    std::vector<Stats> thread_stats(cfg.num_threads);
 
     auto start_time = std::chrono::high_resolution_clock::now();
 
-    std::cout << "Starting " << bench_config.threads << " threads for " << bench_config.iterations << " total iterations..." << std::endl;
-    for (int i = 0; i < bench_config.threads; ++i) {
-        threads.emplace_back(worker_thread, std::ref(cache), std::ref(bench_config), std::ref(stats[i]), std::ref(prefixes), i);
+    for (int i = 0; i < cfg.num_threads; ++i) {
+        threads.emplace_back(worker_thread, std::ref(cache), std::cref(cfg), std::ref(thread_stats[i]), std::cref(prompts), i);
     }
 
     for (auto& t : threads) {
@@ -155,44 +150,31 @@ int main(int argc, char* argv[]) {
     }
 
     auto end_time = std::chrono::high_resolution_clock::now();
-    double duration_s = std::chrono::duration<double>(end_time - start_time).count();
+    double total_duration_s = std::chrono::duration<double>(end_time - start_time).count();
 
-    // Aggregate stats
     Stats total_stats;
-    int total_gets = 0;
-    int total_puts = 0;
-    for (const auto& s : stats) {
-        total_stats.ops += s.ops.load();
-        total_stats.hits += s.hits.load();
-        total_stats.bytes_stored += s.bytes_stored.load();
-        total_stats.get_latency_ms += s.get_latency_ms.load();
-        total_stats.put_latency_ms += s.put_latency_ms.load();
-        
-        int thread_ops = s.ops.load();
-        if (thread_ops > 0) {
-            double hit_ratio_thread = static_cast<double>(s.hits.load()) / thread_ops;
-            int gets_in_thread = thread_ops * hit_ratio_thread;
-            int puts_in_thread = thread_ops - gets_in_thread;
-            if (gets_in_thread > 0) total_gets++;
-            if (puts_in_thread > 0) total_puts++;
-        }
+    for (const auto& s : thread_stats) {
+        total_stats.num_gets += s.num_gets.load();
+        total_stats.num_puts += s.num_puts.load();
+        total_stats.cache_hits += s.cache_hits.load();
+        atomic_add_double(total_stats.get_latency_ms, s.get_latency_ms.load());
+        atomic_add_double(total_stats.put_latency_ms, s.put_latency_ms.load());
     }
-    
-    double ops_per_sec = (duration_s > 0) ? total_stats.ops / duration_s : 0.0;
-    double hit_ratio = (total_stats.ops > 0) ? static_cast<double>(total_stats.hits) / total_stats.ops : 0.0;
-    double avg_get_latency = (total_gets > 0) ? total_stats.get_latency_ms / total_gets : 0.0;
-    double avg_put_latency = (total_puts > 0) ? total_stats.put_latency_ms / total_puts : 0.0;
 
-    std::cout << "\n--- Results ---" << std::endl;
-    std::cout << std::fixed << std::setprecision(2);
-    std::cout << "Total duration: " << duration_s << " s" << std::endl;
-    std::cout << "Ops/sec: " << ops_per_sec << std::endl;
-    std::cout << "Hit ratio: " << hit_ratio * 100.0 << "%" << std::endl;
-    std::cout << "Bytes stored: " << total_stats.bytes_stored / (1024.0 * 1024.0) << " MiB" << std::endl;
-    std::cout << "Average GET latency: " << avg_get_latency << " ms" << std::endl;
-    std::cout << "Average PUT latency: " << avg_put_latency << " ms" << std::endl;
-    std::cout << "Final used bytes: " << cache.UsedBytes() / (1024.0 * 1024.0) << " MiB / "
-              << cache.CapacityBytes() / (1024.0 * 1024.0) << " MiB" << std::endl;
+    double hit_rate = (total_stats.num_gets > 0) ? (double)total_stats.cache_hits / total_stats.num_gets * 100.0 : 0.0;
+    double avg_get_latency = (total_stats.num_gets > 0) ? total_stats.get_latency_ms.load() / total_stats.num_gets : 0.0;
+    double avg_put_latency = (total_stats.num_puts > 0) ? total_stats.put_latency_ms.load() / total_stats.num_puts : 0.0;
+    double ops_per_sec = cfg.num_prompts / total_duration_s;
+
+    std::cout << "----------- Results -----------" << std::endl;
+    std::cout << "Total duration: " << total_duration_s << " s" << std::endl;
+    std::cout << "Operations per second: " << ops_per_sec << std::endl;
+    std::cout << "GET operations: " << total_stats.num_gets << std::endl;
+    std::cout << "PUT operations: " << total_stats.num_puts << std::endl;
+    std::cout << "Cache hit rate: " << hit_rate << " %" << std::endl;
+    std::cout << "Avg. GET latency: " << avg_get_latency << " ms" << std::endl;
+    std::cout << "Avg. PUT latency: " << avg_put_latency << " ms" << std::endl;
+    std::cout << "-----------------------------" << std::endl;
 
     return 0;
 }
